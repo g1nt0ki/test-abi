@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Abi any chain</title>
+</head>
+
+<body>
+  Chain:
+  <br id="postdropdown"> <br>
+  <label for="evmAddress">Contract Address:</label>
+  <input type="text" id="evmAddress" name="evmAddress" placeholder="0x..."><br>
+  <label for="abiInterface">ABI Interface:</label>
+  <input type="text" id="abiInterface" name="abiInterface"
+    placeholder="function balanceOf(address) view returns (uint256)">
+  <button onclick="generateInterface2()">Generate HTML interface</button>
+  <br>
+  <br>
+  <textarea id="abiInput" rows="10" cols="50" placeholder="Paste Solidity ABI JSON here..."></textarea>
+  <button onclick="generateInterface()">Generate HTML interface from json</button>
+  <br><br><br>
+  <div id="interfaceContainer"></div>
+  <br><br><br>
+  Result:
+  <div id="resultsContainer"></div>
+  <script type="module">
+    import { ethers } from "https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.min.js";
+    window.ethers = ethers;
+  </script>
+  <script>
+    let chains;
+    const abiMap = {}
+    const chainMap = {}
+    let currentChainInfo
+    function generateInterface2() {
+      const abiInput = document.getElementById('abiInterface').value;
+
+      try {
+        const contractInterface = new ethers.Interface([abiInput])
+        const abiJson = JSON.parse(contractInterface.formatJson())
+        generateHTMLInterfaceFromJSON(abiJson);
+      } catch (e) {
+        console.log(e)
+        alert('Invalid ABI JSON');
+      }
+    }
+
+
+    function generateInterface() {
+      const abiInput = document.getElementById('abiInput').value;
+
+      try {
+        const abiJson = JSON.parse(abiInput);
+        generateHTMLInterfaceFromJSON(abiJson);
+      } catch (e) {
+        console.log(e)
+        alert('Invalid ABI JSON');
+      }
+    }
+
+    function generateHTMLInterfaceFromJSON(abiJson) {
+      const interfaceContainer = document.getElementById('interfaceContainer');
+      interfaceContainer.innerHTML = ''; // Clear previous interface
+      const methods = abiJson.filter(item => item.type === 'function');
+
+      methods.forEach(method => {
+        abiMap[method.name] = method
+        const methodElement = document.createElement('div');
+        methodElement.innerHTML = `<strong>${method.name}</strong>: `;
+
+        if (method.inputs.length > 0) {
+          method.inputs.forEach(input => {
+            const inputField = document.createElement('input');
+            inputField.setAttribute('placeholder', input.name + ' (' + input.type + ')');
+            inputField.setAttribute('id', method.name + '_' + input.name);
+            methodElement.appendChild(inputField);
+          });
+        }
+
+        const callButton = document.createElement('button');
+        callButton.textContent = 'Call';
+        callButton.onclick = () => callMethod(method.name, method.inputs);
+        methodElement.appendChild(callButton);
+
+        interfaceContainer.appendChild(methodElement);
+      });
+
+    }
+
+    async function fetchChainListAndCreateDropdown() {
+      try {
+        const response = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://chainlist.org/rpcs.json'))
+        chains = await response.json();
+        chains.forEach(chain => {
+          chainMap[chain.chainId] = chain
+        })
+        currentChainInfo = chains[0]
+        chains.sort((a, b) => a.name.localeCompare(b.name))
+        chains.unshift(currentChainInfo)
+        const dropdown = document.createElement('select');
+        dropdown.id = 'chainDropdown';
+        dropdown.addEventListener('change', function () {
+          const selectedChainId = this.value;
+          currentChainInfo = chainMap[selectedChainId]
+        });
+
+
+        chains.forEach(chain => {
+          const option = document.createElement('option');
+          option.value = chain.chainId;
+          option.textContent = chain.name;
+          dropdown.appendChild(option);
+        });
+
+        document.body.insertBefore(dropdown, document.getElementById('postdropdown'));
+      } catch (error) {
+        console.error('Failed to fetch chain list:', error);
+      }
+    }
+
+    async function callMethod(methodName, inputs) {
+      const contractAddress = document.getElementById('evmAddress').value;
+
+      const params = inputs.map(input => {
+        const inputElement = document.getElementById(methodName + '_' + input.name);
+        return inputElement ? inputElement.value : '';
+      });
+      const abi = abiMap[methodName]
+
+      const contractInterface = new ethers.Interface([abi]);
+      const functionABI = ethers.FunctionFragment.from(abi);
+      const callData = contractInterface.encodeFunctionData(functionABI, params);
+
+
+      for (const rpc of currentChainInfo.rpc) {
+        try {
+          const body = {
+            "jsonrpc": "2.0", "id": 1,
+            "params": [{ "to": contractAddress, "data": callData }],
+            "method": "eth_call"
+          }
+          const { result } = await (await fetch(rpc.url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+          })).json();
+          const decodedResult = contractInterface.decodeFunctionResult(abi, result);
+          showResult(rpc.url, true, convertResults(decodedResult, functionABI), currentChainInfo.name, '', {
+            contractAddress,
+            methodName,
+          });
+          break;
+        } catch (e) {
+          console.log('Failed to call', rpc.url, e)
+          showResult(rpc.url, false, '', currentChainInfo.name, e.message);
+        }
+      }
+
+    }
+
+
+    function convertResults(results, functionABI) {
+      let response
+      if (typeof results === "string" || typeof results === "boolean")
+        return results
+
+      if (isNumberOrBigNumber(results))
+        return results.toString();
+
+      response = stringifyBigNumbers(results)
+
+      if (functionABI && functionABI.outputs) {
+        const outputNames = functionABI.outputs.map((i) => i.name)
+        outputNames.map((name, i) => {
+          setComponentDetails(response[i], functionABI.outputs[i])
+          if (name)
+            response[name] = response[i]
+        })
+      }
+
+      if (response instanceof Array)
+        if (response.length === 1)
+          return response[0]
+
+      return response;
+
+      function isNumberOrBigNumber(value) {
+        return typeof value === 'bigint' || typeof value === "number"
+      }
+
+      function stringifyBigNumbers(result) {
+        let final = { ...result }
+        if (Array.isArray(result))
+          final = [...result]
+        Object.keys(result).forEach((key) => {
+          if (isNumberOrBigNumber(result[key]))
+            final[key] = result[key].toString()
+          else if (typeof result[key] === "object")
+            final[key] = stringifyBigNumbers(result[key])
+          else
+            final[key] = result[key]
+        });
+        return final
+      }
+
+      function setComponentDetails(component, componentDefinition) {
+        if (componentDefinition.type === "tuple[]")
+          return component.map(setDetails)
+
+        if (componentDefinition.type === "tuple")
+          return setDetails(component)
+
+        function setDetails(value) {
+          const definitions = componentDefinition.components || componentDefinition.arrayChildren.components
+          definitions.map((def, i) => {
+            setComponentDetails(value[i], def)
+            const name = def.name
+            if (name)
+              value[name] = value[i]
+          })
+        }
+      }
+    }
+
+    function showResult(rpcAddress, success, result, chainName, errorMessage, {
+      contractAddress, methodName,
+    } = {}) {
+      const resultsContainer = document.getElementById('resultsContainer');
+      const resultElement = document.createElement('div');
+      resultElement.classList.add('result-item'); // Add this class for styling purposes
+
+      // Customize this template as needed
+      resultElement.innerHTML = `<br><br>
+        <strong>Status</strong>: ${success ? 'Success' : 'Failed'}  <br>
+        Chain Name: ${chainName} <br> RPC: ${rpcAddress} 
+        timestamp: ${new Date().toLocaleString()}   <br>
+         
+         ${success ? `Contract: ${contractAddress} method: ${methodName} <br>` : ''}
+         <br>
+        ${success ? `<strong>Result</strong>: ${result}` : `Error: ${errorMessage}`} <br>
+        <hr>
+    `;
+
+      // Prepend the new result to ensure the latest message is at the top
+      resultsContainer.insertBefore(resultElement, resultsContainer.firstChild);
+    }
+
+
+    window.onload = () => {
+      fetchChainListAndCreateDropdown();
+    };
+  </script>
+</body>
+
+</html>
